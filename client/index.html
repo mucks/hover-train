@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hover Train</title>
+    <style>
+      html, body, canvas { margin: 0; width: 100%; height: 100%; background: #05080c; }
+    </style>
+  </head>
+  <body>
+    <script type="module">
+      import init from "./client.js";
+      // You can override server URL by adding ?server= ws url
+      const url = new URL(window.location.href);
+      const server = url.searchParams.get("server");
+      if (server) {
+        window.SERVER_WS_URL = server; // read in Rust via env var-like fallback not wired for wasm; used by JS bridge if needed
+      }
+      init();
+    </script>
+  </body>
+  </html>
+
