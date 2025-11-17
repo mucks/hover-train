@@ -1,7 +1,12 @@
 use bevy::prelude::*;
 use bevy_transform_interpolation::prelude::*;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use js_sys::Date;
 use bevy::pbr::prelude::{StandardMaterial, MeshMaterial3d};
 use bevy::prelude::Mesh3d;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
@@ -40,14 +45,24 @@ fn main() {
 		console_log::init_with_level(log::Level::Info).ok();
 	}
 
-	App::new()
+	let mut app = App::new();
+	#[cfg(target_arch = "wasm32")]
+	{
+		// Disable LogPlugin for WASM since we're using console_log
+		app.add_plugins(DefaultPlugins.build().disable::<bevy::log::LogPlugin>());
+	}
+	#[cfg(not(target_arch = "wasm32"))]
+	{
+		app.add_plugins(DefaultPlugins);
+	}
+	
+	app
 		.insert_resource(ClientInfo { id: None, world_size: 0.0 })
 		.insert_resource(WorldCache::default())
 		.insert_resource(NetChannels::default())
 		.insert_resource(PingTracker::default())
 		.insert_resource(FpsCounter::default())
 		.insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.09)))
-		.add_plugins(DefaultPlugins)
 		.add_systems(Startup, (setup_scene_3d, net_connect))
 		.add_systems(Update, spawn_grid_once)
 		.add_systems(Update, (
@@ -96,10 +111,37 @@ struct FollowCam {
 
 // Grid size will be set from server Welcome message
 
+// WASM-compatible time tracking
+#[cfg(not(target_arch = "wasm32"))]
+type TimeInstant = std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+struct TimeInstant(f64); // milliseconds since epoch
+
+#[cfg(not(target_arch = "wasm32"))]
+fn time_now() -> TimeInstant {
+	TimeInstant::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn time_now() -> TimeInstant {
+	TimeInstant(Date::now())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn time_elapsed(start: TimeInstant) -> f64 {
+	start.elapsed().as_secs_f64() * 1000.0 // convert to milliseconds
+}
+
+#[cfg(target_arch = "wasm32")]
+fn time_elapsed(start: TimeInstant) -> f64 {
+	Date::now() - start.0
+}
+
 #[derive(Resource, Default)]
 struct PingTracker {
 	last_id: u64,
-	in_flight: HashMap<u64, Instant>,
+	in_flight: HashMap<u64, TimeInstant>,
 	rtt_ms: f32,
 }
 
@@ -151,7 +193,23 @@ fn net_connect(mut chans: ResMut<NetChannels>) {
 	chans.to_server = Some(tx_out.clone());
 	chans.from_server = Some(rx_in);
 
+	#[cfg(not(target_arch = "wasm32"))]
 	let url = std::env::var("SERVER_WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:4001/ws".to_string());
+	#[cfg(target_arch = "wasm32")]
+	let url = {
+		// In browser, connect directly to the server on port 4001
+		// (Trunk proxy doesn't handle WebSocket upgrades well, so connect directly)
+		let window = web_sys::window().expect("no global `window` exists");
+		let location = window.location();
+		// Use ws:// for localhost (server is on port 4001)
+		if location.hostname().unwrap_or_default() == "127.0.0.1" || location.hostname().unwrap_or_default() == "localhost" {
+			"ws://127.0.0.1:4001/ws".to_string()
+		} else {
+			// For production, you'd use the actual host
+			let protocol = if location.protocol().unwrap_or_default() == "https:" { "wss:" } else { "ws:" };
+			format!("{}//{}:4001/ws", protocol, location.hostname().unwrap_or_default())
+		}
+	};
 	#[cfg(not(target_arch = "wasm32"))]
 	{
 		std::thread::spawn(move || {
@@ -191,8 +249,35 @@ fn net_connect(mut chans: ResMut<NetChannels>) {
 		use wasm_bindgen_futures::spawn_local;
 		use web_sys::{ErrorEvent, MessageEvent, WebSocket};
 		spawn_local(async move {
-			let ws = WebSocket::new(&url).unwrap();
+			log::info!("Attempting to connect to WebSocket: {}", url);
+			let ws = match WebSocket::new(&url) {
+				Ok(ws) => ws,
+				Err(e) => {
+					log::error!("Failed to create WebSocket: {:?}", e);
+					return;
+				}
+			};
 			ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
+			
+			// Add onopen handler to log successful connection
+			{
+				let url_for_log = url.clone();
+				let onopen = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+					log::info!("WebSocket connected to {}", url_for_log);
+				});
+				ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+				onopen.forget();
+			}
+			
+			// Add onclose handler
+			{
+				let onclose = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+					log::warn!("WebSocket connection closed");
+				});
+				ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+				onclose.forget();
+			}
+			
 			{
 				let mut tx_in = tx_in.clone();
 				let onmessage = Closure::<dyn FnMut(_)>::new(move |e: MessageEvent| {
@@ -204,8 +289,9 @@ fn net_connect(mut chans: ResMut<NetChannels>) {
 				onmessage.forget();
 			}
 			{
-				let onerror = Closure::<dyn FnMut(_)>::new(move |e: ErrorEvent| {
-					log::error!("ws error: {:?}", e.message());
+				let onerror = Closure::<dyn FnMut(_)>::new(move |_e: ErrorEvent| {
+					// ErrorEvent.message() may not be available in all browsers
+					log::error!("WebSocket error occurred");
 				});
 				ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 				onerror.forget();
@@ -214,7 +300,16 @@ fn net_connect(mut chans: ResMut<NetChannels>) {
 			let ws_clone = ws.clone();
 			spawn_local(async move {
 				while let Some(out) = rx_out.next().await {
-					let _ = ws_clone.send_with_str(&out);
+					// Check if WebSocket is still open before sending
+					if ws_clone.ready_state() == web_sys::WebSocket::OPEN {
+						if let Err(e) = ws_clone.send_with_str(&out) {
+							log::error!("Failed to send WebSocket message: {:?}", e);
+							break;
+						}
+					} else {
+						log::warn!("WebSocket is not open, dropping message");
+						break;
+					}
 				}
 			});
 		});
@@ -258,8 +353,8 @@ fn net_pump(mut commands: Commands, mut chans: ResMut<NetChannels>, mut cache: R
 					}
 					ServerToClient::Pong(id) => {
 						if let Some(start) = ping.in_flight.remove(&id) {
-							let rtt = start.elapsed();
-							ping.rtt_ms = (rtt.as_secs_f64() * 1000.0) as f32;
+							let rtt_ms = time_elapsed(start);
+							ping.rtt_ms = rtt_ms as f32;
 						}
 					}
 					ServerToClient::YouDied => {}
@@ -791,8 +886,15 @@ fn send_ping(
 	let t = timer.as_mut().unwrap();
 	t.tick(time.delta());
 	if !t.just_finished() { return; }
-	let id = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or_else(|_| tracker.last_id.wrapping_add(1));
-	tracker.in_flight.insert(id, Instant::now());
+	#[cfg(not(target_arch = "wasm32"))]
+	let id = {
+		SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or_else(|_| tracker.last_id.wrapping_add(1))
+	};
+	#[cfg(target_arch = "wasm32")]
+	let id = {
+		(Date::now() as u64).max(tracker.last_id.wrapping_add(1))
+	};
+	tracker.in_flight.insert(id, time_now());
 	tracker.last_id = id;
 	if let Some(tx) = &chans.to_server {
 		let _ = tx.unbounded_send(serde_json::to_string(&ClientToServer::Ping(id)).unwrap());

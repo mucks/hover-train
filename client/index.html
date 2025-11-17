@@ -10,14 +10,17 @@
   </head>
   <body>
     <script type="module">
-      import init from "./client.js";
-      // You can override server URL by adding ?server= ws url
-      const url = new URL(window.location.href);
-      const server = url.searchParams.get("server");
-      if (server) {
-        window.SERVER_WS_URL = server; // read in Rust via env var-like fallback not wired for wasm; used by JS bridge if needed
-      }
-      init();
+      // Wait for Trunk to load the WASM module
+      window.addEventListener("TrunkApplicationStarted", (event) => {
+        // You can override server URL by adding ?server= ws url
+        const url = new URL(window.location.href);
+        const server = url.searchParams.get("server");
+        if (server) {
+          window.SERVER_WS_URL = server;
+        }
+        // WASM module is already initialized by Trunk
+        console.log("Hover Train started", event.detail);
+      });
     </script>
   </body>
   </html>
