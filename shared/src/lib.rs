@@ -69,7 +69,7 @@ pub struct GameConfig {
 impl Default for GameConfig {
 	fn default() -> Self {
 		Self {
-			world_size: 64.0,
+			world_size: 128.0, // Doubled from 64.0 (full world is now 256x256)
 			player_speed: 6.0,
 			turn_speed: 2.5,
 			initial_length: 3,
@@ -108,8 +108,34 @@ impl GameSim {
 			z: rng.gen_range(-ws..ws),
 		};
 		let rotation_y = rng.gen_range(0.0..std::f32::consts::TAU);
+		
+		// Initialize train with 2 carts (3 positions total: player + 2 carts)
+		// Calculate positions behind the player for the carts
+		// Cart spacing: cart length (1.4) + gap (0.8) = 2.2 units between cart centers
+		// Player back to first cart: player_back_offset (0.9) + gap (0.8) + cart_front_offset (0.7) = 2.4 units
 		let mut train = VecDeque::new();
-		train.push_back(position);
+		train.push_back(position); // Current position (player)
+		
+		// Calculate backward direction from rotation
+		let backward_x = -rotation_y.sin();
+		let backward_z = -rotation_y.cos();
+		
+		// First cart position: behind player by 2.4 units (player back + gap + cart front)
+		let cart1_pos = Vec3 {
+			x: position.x + backward_x * 2.4,
+			y: 0.5,
+			z: position.z + backward_z * 2.4,
+		};
+		train.push_back(cart1_pos);
+		
+		// Second cart position: behind first cart by 2.2 units (cart back + gap + cart front)
+		let cart2_pos = Vec3 {
+			x: cart1_pos.x + backward_x * 2.2,
+			y: 0.5,
+			z: cart1_pos.z + backward_z * 2.2,
+		};
+		train.push_back(cart2_pos);
+		
 		self.state.players.insert(id, PlayerState { id, position, rotation_y, train, alive: true });
 		id
 	}
@@ -117,6 +143,26 @@ impl GameSim {
 	pub fn remove_player(&mut self, id: &PlayerId) {
 		self.state.players.remove(id);
 		self.pending_inputs.remove(id);
+	}
+
+	pub fn respawn_player(&mut self, id: &PlayerId) {
+		if let Some(player) = self.state.players.get_mut(id) {
+			let mut rng = rand::thread_rng();
+			let ws = self.cfg.world_size;
+			// Respawn at random position
+			player.position = Vec3 {
+				x: rng.gen_range(-ws..ws),
+				y: 0.5,
+				z: rng.gen_range(-ws..ws),
+			};
+			player.rotation_y = rng.gen_range(0.0..std::f32::consts::TAU);
+			// Reset train to just the player position (no cubes)
+			player.train.clear();
+			player.train.push_back(player.position);
+			player.alive = true;
+			// Clear any pending inputs
+			self.pending_inputs.remove(id);
+		}
 	}
 
 	pub fn submit_input(&mut self, id: PlayerId, input: TurnInput) {
@@ -171,15 +217,19 @@ impl GameSim {
 			player.position.x += forward_x * self.cfg.player_speed * dt;
 			player.position.z += forward_z * self.cfg.player_speed * dt;
 			
-			// Wrap position
-			let wrap = |v: f32| {
-				let mut r = v;
-				if r < -world_size { r = world_size; }
-				if r > world_size { r = -world_size; }
-				r
-			};
-			player.position.x = wrap(player.position.x);
-			player.position.z = wrap(player.position.z);
+			// Check wall collisions - kill player if they hit the boundary
+			// Player radius is approximately 0.5 (half of 1.0 cube size, but we use 0.9 for train shape)
+			let player_radius = 0.5;
+			if player.position.x <= -world_size + player_radius || 
+			   player.position.x >= world_size - player_radius ||
+			   player.position.z <= -world_size + player_radius ||
+			   player.position.z >= world_size - player_radius {
+				player.alive = false;
+			} else {
+				// Clamp position to keep player within bounds (prevent going slightly past wall)
+				player.position.x = player.position.x.clamp(-world_size + player_radius, world_size - player_radius);
+				player.position.z = player.position.z.clamp(-world_size + player_radius, world_size - player_radius);
+			}
 			player.position.y = 0.5; // Maintain hover height
 		}
 		
@@ -249,6 +299,18 @@ impl GameSim {
 			if let Some(player) = self.state.players.get_mut(&player_id) {
 				player.alive = false;
 			}
+		}
+		
+		// Respawn dead players (with a small delay to prevent instant respawn)
+		// Respawn after 10 ticks (1 second) of being dead
+		let dead_player_ids: Vec<PlayerId> = self.state.players.iter()
+			.filter(|(_, p)| !p.alive)
+			.map(|(id, _)| *id)
+			.collect();
+		for player_id in dead_player_ids {
+			// Check if player has been dead long enough (simple: respawn immediately for now)
+			// In a real game you might want a respawn timer
+			self.respawn_player(&player_id);
 		}
 		
 		// Periodic spawn
