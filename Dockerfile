@@ -1,7 +1,7 @@
 # Multi-stage build for hover-truck
 
 # Stage 1: Build server
-FROM rust:1.90-slim as server-builder
+FROM rust:1.90-slim AS server-builder
 
 WORKDIR /app
 
@@ -22,7 +22,7 @@ ENV CARGO_BUILD_JOBS=2
 RUN cargo build --release -p server
 
 # Stage 2: Build WASM client
-FROM rust:1.90-slim as client-builder
+FROM rust:1.90-slim AS client-builder
 
 WORKDIR /app
 
