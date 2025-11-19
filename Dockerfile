@@ -39,10 +39,11 @@ ENV CARGO_BUILD_JOBS=1
 RUN cargo install --locked wasm-bindgen-cli && \
     cargo install --locked trunk
 
-# Copy workspace files
+# Copy workspace files (need all members for workspace to be valid)
 COPY Cargo.toml Cargo.lock ./
 COPY shared ./shared
 COPY client ./client
+COPY server ./server
 
 # Build client WASM
 WORKDIR /app/client
