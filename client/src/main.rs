@@ -140,7 +140,7 @@ fn main() {
     .insert_resource(PingTracker::default())
     .insert_resource(FpsCounter::default())
     .insert_resource(LoadingState::default())
-    // Test player resources
+    // Test player resources (always exist, but only populated in debug builds)
     .insert_resource(TestPlayerInfo {
         id: None,
         world_size: 0.0,
@@ -153,6 +153,7 @@ fn main() {
         (
             setup_scene_3d,
             net_connect,
+            #[cfg(debug_assertions)]
             net_connect_test_player,
             setup_loading_screen,
         ),
@@ -162,13 +163,17 @@ fn main() {
         Update,
         (
             net_pump,
+            #[cfg(debug_assertions)]
             net_pump_test_player,
             send_player_input,
+            #[cfg(debug_assertions)]
             send_test_player_input,
             local_player_move,
+            #[cfg(debug_assertions)]
             test_player_move,
             update_truck_trailers,
             reconcile_server_state,
+            #[cfg(debug_assertions)]
             reconcile_test_player_state,
             update_follow_cam,
             send_ping,
@@ -466,7 +471,8 @@ fn net_connect(mut chans: ResMut<NetChannels>) {
     }
 }
 
-// Test player connection (separate WebSocket)
+// Test player connection (separate WebSocket) - debug builds only
+#[cfg(debug_assertions)]
 fn net_connect_test_player(mut chans: ResMut<TestPlayerChannels>) {
     if chans.to_server.is_some() {
         return;
@@ -675,7 +681,8 @@ fn net_pump(
     }
 }
 
-// Test player net pump
+// Test player net pump - debug builds only
+#[cfg(debug_assertions)]
 fn net_pump_test_player(
     mut commands: Commands,
     mut chans: ResMut<TestPlayerChannels>,
@@ -790,7 +797,8 @@ fn send_player_input(
     }
 }
 
-// Send test player input (arrow keys only)
+// Send test player input (arrow keys only) - debug builds only
+#[cfg(debug_assertions)]
 fn send_test_player_input(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1107,7 +1115,8 @@ fn local_player_move(
     }
 }
 
-// Move test player every frame (client-side prediction)
+// Move test player every frame (client-side prediction) - debug builds only
+#[cfg(debug_assertions)]
 fn test_player_move(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1241,9 +1250,12 @@ fn update_truck_trailers(
         player_transforms.insert(local_player.id, *transform);
     }
 
-    // Get test player transform
-    if let Ok((test_player, transform)) = q_test_player.single() {
-        player_transforms.insert(test_player.id, *transform);
+    // Get test player transform (debug builds only)
+    #[cfg(debug_assertions)]
+    {
+        if let Ok((test_player, transform)) = q_test_player.single() {
+            player_transforms.insert(test_player.id, *transform);
+        }
     }
 
     // Get server player transforms
@@ -1271,13 +1283,22 @@ fn update_truck_trailers(
             continue;
         };
 
-        // Check if this player belongs to test player, if so use test sim
-        let player_state = if test_id.is_some() && *player_id == test_id.unwrap() {
-            test_sim
-                .as_ref()
-                .and_then(|ts| ts.sim.state.players.get(player_id))
-        } else {
-            sim.sim.state.players.get(player_id)
+        // Check if this player belongs to test player, if so use test sim (debug builds only)
+        let player_state = {
+            #[cfg(debug_assertions)]
+            {
+                if test_id.is_some() && *player_id == test_id.unwrap() {
+                    test_sim
+                        .as_ref()
+                        .and_then(|ts| ts.sim.state.players.get(player_id))
+                } else {
+                    sim.sim.state.players.get(player_id)
+                }
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                sim.sim.state.players.get(player_id)
+            }
         };
 
         if let Some(player_state) = player_state {
@@ -1464,7 +1485,8 @@ fn reconcile_server_state(
     sim.last_server_tick = world.tick;
 }
 
-// Reconcile test player state with server state
+// Reconcile test player state with server state - debug builds only
+#[cfg(debug_assertions)]
 fn reconcile_test_player_state(
     time: Res<Time>,
     mut cache: ResMut<TestPlayerCache>,
@@ -1579,8 +1601,14 @@ fn sync_world_state(
 
     // Check if local player entity exists
     let local_player_entity = q_local_player.iter().next();
+    #[cfg(debug_assertions)]
     let test_player_entity = q_test_player.iter().next();
+    #[cfg(not(debug_assertions))]
+    let test_player_entity = None;
+    #[cfg(debug_assertions)]
     let test_id = test_client.id;
+    #[cfg(not(debug_assertions))]
+    let test_id: Option<shared::PlayerId> = None;
 
     let mut existing_collectibles: HashMap<Uuid, Entity> = HashMap::new();
     for (e, sc) in q_collectibles.iter() {
@@ -1597,7 +1625,10 @@ fn sync_world_state(
     let player_mesh = meshes.add(Cuboid::new(0.8, 0.8, 1.8));
     for (player_id, player_state) in world.players.iter() {
         let is_me = *player_id == my_id;
+        #[cfg(debug_assertions)]
         let is_test = test_id.is_some() && *player_id == test_id.unwrap();
+        #[cfg(not(debug_assertions))]
+        let is_test = false;
 
         // Despawn dead players
         if !player_state.alive {
@@ -1655,28 +1686,31 @@ fn sync_world_state(
                 sim.just_respawned = false;
             }
         } else if is_test {
-            // Test player - spawn if doesn't exist, otherwise it's updated by test_player_move
-            if test_player_entity.is_none() {
-                commands.spawn((
-                    Mesh3d(player_mesh.clone()),
-                    MeshMaterial3d(player_mat),
-                    Transform::from_translation(pos).with_rotation(rot),
-                    GlobalTransform::default(),
-                    Visibility::default(),
-                    InheritedVisibility::default(),
-                    TestPlayer { id: *player_id },
-                    SceneTag,
-                ));
-            } else if let Some(mut test_sim_ref) = test_sim.as_mut() {
-                if test_sim_ref.just_respawned {
-                    // Test player just respawned - update transform instantly (no interpolation)
-                    if let Some(entity) = test_player_entity {
-                        commands
-                            .entity(entity)
-                            .insert(Transform::from_translation(pos).with_rotation(rot));
+            // Test player - spawn if doesn't exist, otherwise it's updated by test_player_move (debug builds only)
+            #[cfg(debug_assertions)]
+            {
+                if test_player_entity.is_none() {
+                    commands.spawn((
+                        Mesh3d(player_mesh.clone()),
+                        MeshMaterial3d(player_mat),
+                        Transform::from_translation(pos).with_rotation(rot),
+                        GlobalTransform::default(),
+                        Visibility::default(),
+                        InheritedVisibility::default(),
+                        TestPlayer { id: *player_id },
+                        SceneTag,
+                    ));
+                } else if let Some(mut test_sim_ref) = test_sim.as_mut() {
+                    if test_sim_ref.just_respawned {
+                        // Test player just respawned - update transform instantly (no interpolation)
+                        if let Some(entity) = test_player_entity {
+                            commands
+                                .entity(entity)
+                                .insert(Transform::from_translation(pos).with_rotation(rot));
+                        }
+                        // Reset flag after using it
+                        test_sim_ref.just_respawned = false;
                     }
-                    // Reset flag after using it
-                    test_sim_ref.just_respawned = false;
                 }
             }
         } else {
@@ -1780,12 +1814,25 @@ fn sync_world_state(
         Color::srgb(r, g, b)
     };
 
+    // Build a set of expected cart keys from the world state
+    let mut expected_cart_keys: std::collections::HashSet<(PlayerId, usize)> =
+        std::collections::HashSet::new();
+    for (player_id, player_state) in world.players.iter() {
+        if !player_state.alive {
+            continue;
+        }
+        for (order, _) in player_state.trailer.iter().enumerate().skip(1) {
+            expected_cart_keys.insert((*player_id, order));
+        }
+    }
+
+    // Spawn new carts and mark existing ones
     for (player_id, player_state) in world.players.iter() {
         if !player_state.alive {
             continue;
         }
 
-        for (order, _) in player_state.trailer.iter().enumerate().skip(1) {
+        for (order, cart_pos) in player_state.trailer.iter().enumerate().skip(1) {
             let key = (*player_id, order);
 
             if existing_carts.remove(&key).is_none() {
@@ -1793,11 +1840,13 @@ fn sync_world_state(
                 let color = cart_color(player_id, order);
                 let cart_mat = materials.add(color);
 
-                // Spawn new trailer (position will be updated by update_truck_trailers)
+                // Spawn new trailer at the correct position from server state
+                // This prevents the cart from jumping when first spawned
+                let spawn_pos = shared_to_bevy_vec3(*cart_pos);
                 commands.spawn((
                     Mesh3d(cart_mesh.clone()),
                     MeshMaterial3d(cart_mat),
-                    Transform::from_translation(Vec3::ZERO),
+                    Transform::from_translation(spawn_pos),
                     GlobalTransform::default(),
                     Visibility::default(),
                     InheritedVisibility::default(),
@@ -1811,9 +1860,12 @@ fn sync_world_state(
         }
     }
 
-    // Despawn carts that no longer exist
-    for (_, entity) in existing_carts {
-        commands.entity(entity).despawn();
+    // Despawn carts that no longer exist in the expected set
+    // This provides a safety check to ensure we only despawn carts that are truly not expected
+    for (key, entity) in existing_carts {
+        if !expected_cart_keys.contains(&key) {
+            commands.entity(entity).despawn();
+        }
     }
 }
 

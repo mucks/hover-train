@@ -299,13 +299,16 @@ impl GameSim {
 			}
 			
 			// Determine target trailer length
-			// If player grew, add one cart. If didn't grow, remove one cart (but keep at least initial_length)
+			// If player grew, add one cart. Otherwise, keep the current length (trailers don't shrink automatically)
+			// Trailers only shrink when the player dies/respawns
 			let current_length = player.trailer.len();
 			let min_length = self.cfg.initial_length; // Minimum trailer length (player + initial carts)
 			let target_length = if consumed {
 				current_length + 1 // Add a cart when growing
 			} else {
-				(current_length as i32 - 1).max(min_length as i32) as usize // Remove a cart when not growing, but keep at least min_length
+				// Keep current length - trailers don't shrink automatically
+				// They only shrink when player dies and respawns
+				current_length.max(min_length) // Ensure at least minimum length
 			};
 			
 			// Update trailer - store actual cart positions, not just historical player positions
